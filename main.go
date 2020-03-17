@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jtguibas/cinema"
@@ -12,62 +15,93 @@ import (
 )
 
 func download(url string, start, end int) (path string, err error) {
-	log.Println("url", url)
-	toBeDownloaded, err := ytdl.GetVideoInfo(url) // "https://www.youtube.com/watch?v=A02s8omM_hI"
+
+	vid, err := ytdl.GetVideoInfo(url)
 	if err != nil {
 		log.Println("Failed to get video info")
 		return "", err
 	}
-	name := toBeDownloaded.Title + ".mp4"
+	name := fmt.Sprintf("downloads/%v.mp4", vid.Title) // vid.Title + ".mp4"
+
 	file, _ := os.Create(name)
 	defer file.Close()
 
-	toBeDownloaded.Download(toBeDownloaded.Formats[0], file)
+	vid.Download(vid.Formats[0], file)
 	video, err := cinema.Load(name)
 	if err != nil {
 		log.Println(err)
 		return "", err
 	}
 
-	video.SetStart(time.Duration(start))
-	video.SetEnd(time.Duration(end))
-
-	err = video.Render("output.mp4")
-	if err != nil {
-		log.Println(err)
-		return "", err
+	if start != 0 {
+		video.SetStart(time.Duration(start) * time.Second)
 	}
-	return "output.mp4", nil
+
+	if end != 0 {
+		video.SetEnd(time.Duration(end) * time.Second)
+	}
+
+	//video.Trim(st*time.Second, e*time.Second)
+	path = fmt.Sprintf("videos/%v-%v-%v.mp4", vid.Title, start, end)
+	video.Render(path)
+	// log.Println("FFMPEG Command", video.CommandLine(path))
+	return path, nil
 
 }
 
 func main() {
+
+	// file server
+	//fs := http.FileServer(http.Dir("./videos"))
+	fs := dotFileHidingFileSystem{http.Dir("./videos")}
+
+	http.Handle("/videos/", http.StripPrefix(strings.TrimRight("/videos/", "/"), http.FileServer(fs)))
+
+	// download video route handler
 	http.HandleFunc("/download", func(rw http.ResponseWriter, req *http.Request) {
 		url := req.URL.Query().Get("url")
+
 		start := req.URL.Query().Get("start")
 		if start == "" {
 			start = "0"
 		}
+
 		end := req.URL.Query().Get("end")
 		if end == "" {
-			end = "-1"
+			end = "0"
 		}
+
+		log.Printf("start %v end %v \n", start, end)
 		st, err := strconv.Atoi(start)
 		if err != nil {
 			http.Error(rw, "Invalid start time", http.StatusBadRequest)
+			return
 		}
 		e, err := strconv.Atoi(end)
 		if err != nil {
 			http.Error(rw, "Invalid end time", http.StatusBadRequest)
+			return
 		}
+
 		path, err := download(url, st, e)
-		log.Println("path", path)
+
 		if err != nil {
 			log.Println(err)
 			http.Error(rw, "you messed up", http.StatusBadRequest)
+			return
 		}
-		http.ServeFile(rw, req, "Lil Uzi Vert - Wassup feat. Future [Official Audio].mp4")
+
+		jsResp, err := json.Marshal(struct{ URL string }{URL: req.Host + "/" + path})
+		if err != nil {
+			panic(err)
+		}
+
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusOK)
+		rw.Write(jsResp)
+
 	})
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
+
 }
